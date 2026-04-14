@@ -178,12 +178,15 @@ async function downloadPdfsForSelected(): Promise<void> {
 async function downloadAllPdfs(): Promise<void> {
   const allItems = await getAllRegularItems();
 
-  // Count how many actually need a PDF (skip if any PDF attachment item exists)
-  const needsCount = (
-    await Promise.all(allItems.map(async (item) => !(await hasPdfAttachment(item))))
-  ).filter(Boolean).length;
+  // Items that need a PDF: no existing PDF attachment item (with or without file)
+  const needsPdf: Zotero.Item[] = [];
+  for (const item of allItems) {
+    if (!(await hasPdfAttachment(item))) {
+      needsPdf.push(item);
+    }
+  }
 
-  if (!needsCount) {
+  if (!needsPdf.length) {
     new ztoolkit.ProgressWindow(PLUGIN, { closeOnClick: true })
       .createLine({
         text: getString("all-have-pdf"),
@@ -200,13 +203,13 @@ async function downloadAllPdfs(): Promise<void> {
     Zotero.getMainWindow() as unknown as mozIDOMWindowProxy,
     getString("confirm-download-title"),
     getString("confirm-download-message", {
-      args: { count: String(needsCount) },
+      args: { count: String(needsPdf.length) },
     }),
   );
   if (!confirmed) return;
 
-  ztoolkit.log(`[${PLUGIN}] Download All: ${needsCount} PDFs to download`);
-  await batchDownload(allItems);
+  ztoolkit.log(`[${PLUGIN}] Download All: ${needsPdf.length} PDFs to download`);
+  await batchDownload(needsPdf);
 }
 
 async function batchDownload(items: Zotero.Item[]): Promise<void> {
