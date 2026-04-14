@@ -86,18 +86,6 @@ function getRegularItems(items: Zotero.Item[]): Zotero.Item[] {
 }
 
 /**
- * Checks whether a regular item has any PDF attachment item (file may or may not exist).
- */
-async function hasPdfAttachment(item: Zotero.Item): Promise<boolean> {
-  const attachmentIDs: number[] = item.getAttachments();
-  for (const id of attachmentIDs) {
-    const att = Zotero.Items.get(id);
-    if (att?.attachmentContentType === "application/pdf") return true;
-  }
-  return false;
-}
-
-/**
  * Checks whether a regular item has a PDF file on disk.
  */
 async function hasPdfOnDisk(item: Zotero.Item): Promise<boolean> {
@@ -109,6 +97,20 @@ async function hasPdfOnDisk(item: Zotero.Item): Promise<boolean> {
     if (filePath) return true;
   }
   return false;
+}
+
+/**
+ * Erases PDF attachment items that have no file on disk (ghost records).
+ * Called before downloading so addAvailablePDF doesn't create duplicates.
+ */
+async function eraseGhostPdfAttachments(item: Zotero.Item): Promise<void> {
+  const attachmentIDs: number[] = item.getAttachments();
+  for (const id of attachmentIDs) {
+    const att = Zotero.Items.get(id);
+    if (att?.attachmentContentType !== "application/pdf") continue;
+    const filePath = await att.getFilePathAsync();
+    if (!filePath) await att.eraseTx();
+  }
 }
 
 /**
@@ -178,10 +180,10 @@ async function downloadPdfsForSelected(): Promise<void> {
 async function downloadAllPdfs(): Promise<void> {
   const allItems = await getAllRegularItems();
 
-  // Items that need a PDF: no existing PDF attachment item (with or without file)
+  // Items that need a PDF: no PDF file on disk
   const needsPdf: Zotero.Item[] = [];
   for (const item of allItems) {
-    if (!(await hasPdfAttachment(item))) {
+    if (!(await hasPdfOnDisk(item))) {
       needsPdf.push(item);
     }
   }
@@ -213,11 +215,10 @@ async function downloadAllPdfs(): Promise<void> {
 }
 
 async function batchDownload(items: Zotero.Item[]): Promise<void> {
-  // Skip items that already have a PDF attachment item (even if file is missing on disk)
-  // to avoid creating duplicate attachments after a local PDF was removed.
+  // Skip items that already have a PDF file on disk.
   const needsPdf: Zotero.Item[] = [];
   for (const item of items) {
-    if (!(await hasPdfAttachment(item))) {
+    if (!(await hasPdfOnDisk(item))) {
       needsPdf.push(item);
     }
   }
@@ -254,6 +255,9 @@ async function batchDownload(items: Zotero.Item[]): Promise<void> {
 
   for (const item of needsPdf) {
     try {
+      // Remove ghost attachment items (no file on disk) so addAvailablePDF
+      // doesn't create duplicates alongside the existing empty record.
+      await eraseGhostPdfAttachments(item);
       // 60s timeout per item to avoid hanging on network issues
       await Promise.race([
         Zotero.Attachments.addAvailablePDF(item),
