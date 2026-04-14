@@ -1,13 +1,7 @@
-import {
-  BasicExampleFactory,
-  HelperExampleFactory,
-  KeyExampleFactory,
-  PromptExampleFactory,
-  UIExampleFactory,
-} from "./modules/examples";
 import { getString, initLocale } from "./utils/locale";
-import { registerPrefsScripts } from "./modules/preferenceScript";
 import { createZToolkit } from "./utils/ztoolkit";
+
+const PLUGIN = "Local PDF Manager";
 
 async function onStartup() {
   await Promise.all([
@@ -18,172 +12,386 @@ async function onStartup() {
 
   initLocale();
 
-  BasicExampleFactory.registerPrefs();
-
-  BasicExampleFactory.registerNotifier();
-
-  KeyExampleFactory.registerShortcuts();
-
-  await UIExampleFactory.registerExtraColumn();
-
-  await UIExampleFactory.registerExtraColumnWithCustomCell();
-
-  UIExampleFactory.registerItemPaneCustomInfoRow();
-
-  UIExampleFactory.registerItemPaneSection();
-
-  UIExampleFactory.registerReaderItemPaneSection();
-
   await Promise.all(
     Zotero.getMainWindows().map((win) => onMainWindowLoad(win)),
   );
 
-  // Mark initialized as true to confirm plugin loading status
-  // outside of the plugin (e.g. scaffold testing process)
   addon.data.initialized = true;
 }
 
 async function onMainWindowLoad(win: _ZoteroTypes.MainWindow): Promise<void> {
-  // Create ztoolkit for every window
   addon.data.ztoolkit = createZToolkit();
 
   win.MozXULElement.insertFTLIfNeeded(
     `${addon.data.config.addonRef}-mainWindow.ftl`,
   );
 
-  const popupWin = new ztoolkit.ProgressWindow(addon.data.config.addonName, {
-    closeOnClick: true,
-    closeTime: -1,
-  })
-    .createLine({
-      text: getString("startup-begin"),
-      type: "default",
-      progress: 0,
-    })
-    .show();
+  const icon = `chrome://${addon.data.config.addonRef}/content/icons/favicon@0.5x.png`;
 
-  await Zotero.Promise.delay(1000);
-  popupWin.changeLine({
-    progress: 30,
-    text: `[30%] ${getString("startup-begin")}`,
+  // Right-click: Download PDF (selected)
+  ztoolkit.Menu.register("item", {
+    tag: "menuitem",
+    id: "lcm-download-pdf",
+    label: getString("menu-download-pdf"),
+    commandListener: () => downloadPdfsForSelected(),
+    icon,
   });
 
-  UIExampleFactory.registerStyleSheet(win);
-
-  UIExampleFactory.registerRightClickMenuItem();
-
-  UIExampleFactory.registerRightClickMenuPopup(win);
-
-  UIExampleFactory.registerWindowMenuWithSeparator();
-
-  PromptExampleFactory.registerNormalCommandExample();
-
-  PromptExampleFactory.registerAnonymousCommandExample(win);
-
-  PromptExampleFactory.registerConditionalCommandExample();
-
-  await Zotero.Promise.delay(1000);
-
-  popupWin.changeLine({
-    progress: 100,
-    text: `[100%] ${getString("startup-finish")}`,
+  // Right-click: Remove Local PDFs (selected)
+  ztoolkit.Menu.register("item", {
+    tag: "menuitem",
+    id: "lcm-remove-local-pdf",
+    label: getString("menu-remove-pdf"),
+    commandListener: () => removeLocalPdfsForSelected(),
+    icon,
   });
-  popupWin.startCloseTimer(5000);
 
-  addon.hooks.onDialogEvents("dialogExample");
+  // Tools menu: Download All PDFs in Library
+  ztoolkit.Menu.register("menuTools", {
+    tag: "menuitem",
+    id: "lcm-download-all",
+    label: getString("menu-download-all"),
+    commandListener: () => downloadAllPdfs(),
+    icon,
+  });
+
+  // Tools menu: Remove All Local PDFs in Library
+  ztoolkit.Menu.register("menuTools", {
+    tag: "menuitem",
+    id: "lcm-remove-all",
+    label: getString("menu-remove-all"),
+    commandListener: () => removeAllLocalPdfs(),
+    icon,
+  });
 }
 
-async function onMainWindowUnload(win: Window): Promise<void> {
+async function onMainWindowUnload(_win: Window): Promise<void> {
   ztoolkit.unregisterAll();
-  addon.data.dialog?.window?.close();
 }
 
 function onShutdown(): void {
   ztoolkit.unregisterAll();
-  addon.data.dialog?.window?.close();
-  // Remove addon object
   addon.data.alive = false;
   // @ts-expect-error - Plugin instance is not typed
   delete Zotero[addon.data.config.addonInstance];
 }
 
+// ── Helpers ──────────────────────────────────────────────────
+
 /**
- * This function is just an example of dispatcher for Notify events.
- * Any operations should be placed in a function to keep this funcion clear.
+ * Returns all regular items from a list, filtering out attachments/notes.
  */
-async function onNotify(
-  event: string,
-  type: string,
-  ids: Array<string | number>,
-  extraData: { [key: string]: any },
-) {
-  // You can add your code to the corresponding notify type
-  ztoolkit.log("notify", event, type, ids, extraData);
-  if (
-    event == "select" &&
-    type == "tab" &&
-    extraData[ids[0]].type == "reader"
-  ) {
-    BasicExampleFactory.exampleNotifierCallback();
-  } else {
+function getRegularItems(items: Zotero.Item[]): Zotero.Item[] {
+  return items.filter((item) => item.isRegularItem());
+}
+
+/**
+ * Checks whether a regular item has a PDF file on disk.
+ */
+async function hasPdfOnDisk(item: Zotero.Item): Promise<boolean> {
+  const attachmentIDs: number[] = item.getAttachments();
+  for (const id of attachmentIDs) {
+    const att = Zotero.Items.get(id);
+    if (att?.attachmentContentType !== "application/pdf") continue;
+    const filePath = await att.getFilePathAsync();
+    if (filePath) return true;
+  }
+  return false;
+}
+
+/**
+ * Returns PDF attachment items that have a file on disk for a regular item.
+ */
+async function getLocalPdfAttachments(
+  item: Zotero.Item,
+): Promise<Zotero.Item[]> {
+  const result: Zotero.Item[] = [];
+  const attachmentIDs: number[] = item.getAttachments();
+  for (const id of attachmentIDs) {
+    const att = Zotero.Items.get(id);
+    if (att?.attachmentContentType !== "application/pdf") continue;
+    const filePath = await att.getFilePathAsync();
+    if (filePath) result.push(att);
+  }
+  return result;
+}
+
+/**
+ * Gets all regular items in the user's library via Zotero.Search.
+ */
+async function getAllRegularItems(): Promise<Zotero.Item[]> {
+  const s = new Zotero.Search({
+    libraryID: Zotero.Libraries.userLibraryID,
+  });
+  s.addCondition("itemType", "isNot", "attachment");
+  s.addCondition("itemType", "isNot", "note");
+  const ids = await s.search();
+  return ids.map((id: number) => Zotero.Items.get(id) as Zotero.Item);
+}
+
+/**
+ * Formats bytes into a human-readable string (KB, MB, GB).
+ */
+function formatSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  if (bytes < 1024 * 1024 * 1024)
+    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`;
+}
+
+/**
+ * Returns the file size in bytes for a PDF attachment, or 0 if unavailable.
+ */
+async function getPdfFileSize(att: Zotero.Item): Promise<number> {
+  try {
+    const filePath = await att.getFilePathAsync();
+    if (!filePath) return 0;
+    const file = Zotero.File.pathToFile(filePath);
+    return file.exists() ? file.fileSize : 0;
+  } catch {
+    return 0;
+  }
+}
+
+// ── Download operations ──────────────────────────────────────
+
+async function downloadPdfsForSelected(): Promise<void> {
+  const zoteroPane = ztoolkit.getGlobal("ZoteroPane");
+  const selectedItems = zoteroPane.getSelectedItems() as Zotero.Item[];
+  if (!selectedItems.length) return;
+  await batchDownload(getRegularItems(selectedItems));
+}
+
+async function downloadAllPdfs(): Promise<void> {
+  const allItems = await getAllRegularItems();
+
+  // Count how many actually need a PDF
+  const needsCount = (
+    await Promise.all(allItems.map(async (item) => !(await hasPdfOnDisk(item))))
+  ).filter(Boolean).length;
+
+  if (!needsCount) {
+    new ztoolkit.ProgressWindow(PLUGIN, { closeOnClick: true })
+      .createLine({
+        text: getString("all-have-pdf"),
+        type: "success",
+        progress: 100,
+      })
+      .show()
+      .startCloseTimer(3000);
     return;
   }
+
+  // Confirmation dialog
+  const confirmed = Services.prompt.confirm(
+    Zotero.getMainWindow() as unknown as mozIDOMWindowProxy,
+    getString("confirm-download-title"),
+    getString("confirm-download-message", {
+      args: { count: String(needsCount) },
+    }),
+  );
+  if (!confirmed) return;
+
+  ztoolkit.log(`[${PLUGIN}] Download All: ${needsCount} PDFs to download`);
+  await batchDownload(allItems);
 }
 
-/**
- * This function is just an example of dispatcher for Preference UI events.
- * Any operations should be placed in a function to keep this funcion clear.
- * @param type event type
- * @param data event data
- */
-async function onPrefsEvent(type: string, data: { [key: string]: any }) {
-  switch (type) {
-    case "load":
-      registerPrefsScripts(data.window);
-      break;
-    default:
-      return;
+async function batchDownload(items: Zotero.Item[]): Promise<void> {
+  // Filter to items missing a PDF on disk
+  const needsPdf: Zotero.Item[] = [];
+  for (const item of items) {
+    if (!(await hasPdfOnDisk(item))) {
+      needsPdf.push(item);
+    }
   }
-}
 
-function onShortcuts(type: string) {
-  switch (type) {
-    case "larger":
-      KeyExampleFactory.exampleShortcutLargerCallback();
-      break;
-    case "smaller":
-      KeyExampleFactory.exampleShortcutSmallerCallback();
-      break;
-    default:
-      break;
+  if (!needsPdf.length) {
+    new ztoolkit.ProgressWindow(PLUGIN, { closeOnClick: true })
+      .createLine({
+        text: getString("all-have-pdf"),
+        type: "success",
+        progress: 100,
+      })
+      .show()
+      .startCloseTimer(3000);
+    return;
   }
-}
 
-function onDialogEvents(type: string) {
-  switch (type) {
-    case "dialogExample":
-      HelperExampleFactory.dialogExample();
-      break;
-    case "clipboardExample":
-      HelperExampleFactory.clipboardExample();
-      break;
-    case "filePickerExample":
-      HelperExampleFactory.filePickerExample();
-      break;
-    case "progressWindowExample":
-      HelperExampleFactory.progressWindowExample();
-      break;
-    case "vtableExample":
-      HelperExampleFactory.vtableExample();
-      break;
-    default:
-      break;
+  const total = needsPdf.length;
+  let done = 0;
+  let failed = 0;
+  let totalBytes = 0;
+
+  const pw = new ztoolkit.ProgressWindow(PLUGIN, {
+    closeOnClick: false,
+    closeTime: -1,
+  })
+    .createLine({
+      text: getString("download-progress", {
+        args: { done: "0", total: String(total), size: "0 B" },
+      }),
+      type: "default",
+      progress: 0,
+    })
+    .show();
+
+  for (const item of needsPdf) {
+    try {
+      // 60s timeout per item to avoid hanging on network issues
+      await Promise.race([
+        Zotero.Attachments.addAvailablePDF(item),
+        new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error("timeout")), 60000),
+        ),
+      ]);
+      done++;
+      // Measure the newly downloaded file and refresh UI
+      const attachmentIDs: number[] = item.getAttachments();
+      for (const id of attachmentIDs) {
+        const att = Zotero.Items.get(id);
+        if (att?.attachmentContentType === "application/pdf") {
+          totalBytes += await getPdfFileSize(att);
+          Zotero.Notifier.trigger("modify", "item", [att.id]);
+        }
+      }
+      Zotero.Notifier.trigger("modify", "item", [item.id]);
+    } catch {
+      failed++;
+    }
+    pw.changeLine({
+      text: getString("download-progress", {
+        args: {
+          done: String(done + failed),
+          total: String(total),
+          size: formatSize(totalBytes),
+        },
+      }),
+      progress: Math.round(((done + failed) / total) * 100),
+    });
   }
+
+  pw.changeLine({
+    text: getString("download-complete", {
+      args: {
+        done: String(done),
+        total: String(total),
+        size: formatSize(totalBytes),
+      },
+    }),
+    type: done > 0 ? "success" : "fail",
+    progress: 100,
+  });
+  pw.startCloseTimer(5000);
 }
 
-// Add your hooks here. For element click, etc.
-// Keep in mind hooks only do dispatch. Don't add code that does real jobs in hooks.
-// Otherwise the code would be hard to read and maintain.
+// ── Remove operations ────────────────────────────────────────
+
+async function removeLocalPdfsForSelected(): Promise<void> {
+  const zoteroPane = ztoolkit.getGlobal("ZoteroPane");
+  const selectedItems = zoteroPane.getSelectedItems() as Zotero.Item[];
+  if (!selectedItems.length) return;
+  await batchRemove(getRegularItems(selectedItems));
+}
+
+async function removeAllLocalPdfs(): Promise<void> {
+  const allItems = await getAllRegularItems();
+  ztoolkit.log(`[${PLUGIN}] Remove All: ${allItems.length} items in library`);
+  await batchRemove(allItems);
+}
+
+async function batchRemove(items: Zotero.Item[]): Promise<void> {
+  // Collect PDF attachments with files on disk
+  const toRemove: Zotero.Item[] = [];
+  for (const item of items) {
+    const localPdfs = await getLocalPdfAttachments(item);
+    toRemove.push(...localPdfs);
+  }
+
+  if (!toRemove.length) {
+    new ztoolkit.ProgressWindow(PLUGIN, { closeOnClick: true })
+      .createLine({
+        text: getString("no-local-pdf"),
+        type: "default",
+        progress: 100,
+      })
+      .show()
+      .startCloseTimer(3000);
+    return;
+  }
+
+  const total = toRemove.length;
+  let done = 0;
+  let totalBytes = 0;
+
+  const pw = new ztoolkit.ProgressWindow(PLUGIN, {
+    closeOnClick: false,
+    closeTime: -1,
+  })
+    .createLine({
+      text: getString("remove-progress", {
+        args: { done: "0", total: String(total), size: "0 B" },
+      }),
+      type: "default",
+      progress: 0,
+    })
+    .show();
+
+  for (const att of toRemove) {
+    try {
+      const filePath = await att.getFilePathAsync();
+      if (filePath) {
+        const file = Zotero.File.pathToFile(filePath);
+        if (file.exists()) {
+          totalBytes += file.fileSize;
+          file.remove(false);
+          done++;
+          // Notify Zotero to refresh the UI for this item
+          Zotero.Notifier.trigger("modify", "item", [att.id]);
+          if (att.parentItemID) {
+            Zotero.Notifier.trigger("modify", "item", [att.parentItemID]);
+          }
+        }
+      }
+    } catch {
+      // skip failures silently
+    }
+    pw.changeLine({
+      text: getString("remove-progress", {
+        args: {
+          done: String(done),
+          total: String(total),
+          size: formatSize(totalBytes),
+        },
+      }),
+      progress: Math.round(((done + 1) / total) * 100),
+    });
+  }
+
+  pw.changeLine({
+    text: getString("remove-complete", {
+      args: {
+        done: String(done),
+        total: String(total),
+        size: formatSize(totalBytes),
+      },
+    }),
+    type: "success",
+    progress: 100,
+  });
+  pw.startCloseTimer(5000);
+}
+
+// ── Unused hooks (required by template) ──────────────────────
+
+async function onNotify(
+  _event: string,
+  _type: string,
+  _ids: Array<string | number>,
+  _extraData: { [key: string]: any },
+) {}
+
+async function onPrefsEvent(_type: string, _data: { [key: string]: any }) {}
 
 export default {
   onStartup,
@@ -192,6 +400,4 @@ export default {
   onMainWindowUnload,
   onNotify,
   onPrefsEvent,
-  onShortcuts,
-  onDialogEvents,
 };
