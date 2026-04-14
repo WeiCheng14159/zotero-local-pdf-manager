@@ -1,6 +1,7 @@
 # Local PDF Manager for Zotero
 
 [![CI](https://github.com/WeiCheng14159/local-pdf-manager-plugin/actions/workflows/ci.yml/badge.svg)](https://github.com/WeiCheng14159/local-pdf-manager-plugin/actions/workflows/ci.yml)
+[![Release](https://github.com/WeiCheng14159/local-pdf-manager-plugin/actions/workflows/release.yml/badge.svg)](https://github.com/WeiCheng14159/local-pdf-manager-plugin/releases)
 [![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL--3.0-blue.svg)](LICENSE)
 [![Zotero 7](https://img.shields.io/badge/Zotero-7-green.svg)](https://www.zotero.org/)
 [![Version](https://img.shields.io/badge/version-0.1.0-orange.svg)](https://github.com/WeiCheng14159/local-pdf-manager-plugin/releases)
@@ -99,14 +100,30 @@ addon/
 
 ## CI/CD
 
-The project uses GitHub Actions with three workflows:
+This project uses GitHub Actions for automated quality checks and releases.
 
-| Workflow | Trigger | Jobs |
-|---|---|---|
-| **CI** (`ci.yml`) | Push / PR to `main` | Lint → Build → Test |
-| **Release** (`release.yml`) | Git tag `v*` | Build → Publish to GitHub Releases |
+### Continuous Integration (`ci.yml`)
 
-Releases automatically generate `update.json` and `update-beta.json` manifests so Zotero can detect new versions. Beta versions are identified by a `-` in the version string (e.g., `1.0.0-beta.1`).
+Runs on every push and pull request to `main`:
+
+- **lint** — Prettier + ESLint checks
+- **build** — TypeScript compilation + XPI bundling
+- **test** — Integration tests (depends on build)
+
+### Release (`release.yml`)
+
+Triggered automatically when a version tag (`v*`) is pushed:
+
+```sh
+# Bump version, tag, and push — CI will build and release
+npm run release
+```
+
+The release workflow builds the plugin, packages the `.xpi`, and publishes it to GitHub Releases. It also generates `update.json` (stable) or `update-beta.json` (pre-release, versions containing `-`) so Zotero can deliver automatic updates.
+
+### Dependabot
+
+Weekly automated dependency updates with minor and patch bumps grouped into a single PR.
 
 ## Contributing
 
