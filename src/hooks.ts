@@ -346,9 +346,12 @@ async function batchRemove(items: Zotero.Item[]): Promise<void> {
           totalBytes += file.fileSize;
           file.remove(false);
           done++;
-          // Notify Zotero to refresh the UI for this item
+          // Reload so Zotero re-evaluates file existence before re-rendering
+          await att.reload([], true);
           Zotero.Notifier.trigger("modify", "item", [att.id]);
           if (att.parentItemID) {
+            const parent = Zotero.Items.get(att.parentItemID);
+            if (parent) await parent.reload([], true);
             Zotero.Notifier.trigger("modify", "item", [att.parentItemID]);
           }
         }
