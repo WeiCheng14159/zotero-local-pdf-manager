@@ -100,6 +100,68 @@ async function hasPdfOnDisk(item: Zotero.Item): Promise<boolean> {
 }
 
 /**
+ * Returns PDF attachment items that have no file on disk (ghost records).
+ */
+async function getGhostPdfAttachments(item: Zotero.Item): Promise<Zotero.Item[]> {
+  const ghosts: Zotero.Item[] = [];
+  for (const id of item.getAttachments()) {
+    const att = Zotero.Items.get(id);
+    if (att?.attachmentContentType !== "application/pdf") continue;
+    const filePath = await att.getFilePathAsync();
+    if (!filePath) ghosts.push(att);
+  }
+  return ghosts;
+}
+
+/**
+ * Downloads a PDF from remote resolvers (DOI, Unpaywall, etc.) directly into
+ * an existing ghost attachment's storage directory, preserving the attachment
+ * record and any child notes.
+ *
+ * Mirrors what Zotero sync does internally (_processSingleFileDownload) rather
+ * than calling addAvailablePDF, which would create a duplicate attachment record.
+ */
+async function downloadIntoGhostAttachment(
+  ghost: Zotero.Item,
+  parentItem: Zotero.Item,
+): Promise<void> {
+  const storageDir = await Zotero.Attachments.createDirectoryForItem(ghost);
+  let filename = ghost.attachmentFilename;
+
+  // If the ghost has no filename stored, assign one and persist it
+  if (!filename) {
+    filename = `${ghost.key}.pdf`;
+    ghost.attachmentFilename = filename;
+    await ghost.saveTx();
+  }
+
+  const destPath = OS.Path.join(storageDir, filename);
+
+  // Use the same file resolvers (Unpaywall, DOI, etc.) that addAvailablePDF uses
+  // @ts-expect-error - getFileResolvers is not exposed in public types
+  const resolvers: unknown[] = Zotero.Attachments.getFileResolvers?.(parentItem) ?? [];
+
+  for (const resolver of resolvers) {
+    try {
+      // @ts-expect-error - resolver shape is internal
+      const urls: string[] = await (resolver.getURLs?.() ?? []);
+      for (const url of urls) {
+        if (!url) continue;
+        await Zotero.Attachments.downloadFile(url, destPath, {
+          // @ts-expect-error - enforceFileType is valid at runtime but missing from types
+          enforceFileType: true,
+        });
+        return; // success — file is now on disk at the ghost's expected path
+      }
+    } catch {
+      continue; // try next resolver
+    }
+  }
+
+  throw new Error("No PDF source found from any resolver");
+}
+
+/**
  * Returns PDF attachment items that have a file on disk for a regular item.
  */
 async function getLocalPdfAttachments(
@@ -241,9 +303,15 @@ async function batchDownload(items: Zotero.Item[]): Promise<void> {
 
   for (const item of needsPdf) {
     try {
+      const ghosts = await getGhostPdfAttachments(item);
       // 60s timeout per item to avoid hanging on network issues
       await Promise.race([
-        Zotero.Attachments.addAvailablePDF(item),
+        ghosts.length > 0
+          ? // Ghost attachment exists: download into it to preserve notes and
+            // avoid creating a duplicate record (addAvailablePDF always creates new)
+            downloadIntoGhostAttachment(ghosts[0], item)
+          : // No attachment record at all: let Zotero create one normally
+            Zotero.Attachments.addAvailablePDF(item),
         new Promise<never>((_, reject) =>
           setTimeout(() => reject(new Error("timeout")), 60000),
         ),
