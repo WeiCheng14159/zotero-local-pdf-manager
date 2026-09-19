@@ -22,7 +22,7 @@ A Zotero plugin that lets you batch remove local PDF copies for items in your li
 3. Click the gear icon and choose **Install Add-on From File…**
 4. Select the downloaded `.xpi` file.
 
-**Compatibility:** Zotero 7–10 (6.999 – 10.*); verified with Zotero 10.0.3.
+**Compatibility:** Zotero 7–10 (6.999 – 10.\*); verified with Zotero 10.0.3.
 
 ## Usage
 
